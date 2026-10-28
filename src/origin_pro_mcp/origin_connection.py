@@ -280,7 +280,10 @@ def require_worksheet(book: str, sheet: str) -> str:
 
 def require_graph(graph_name: str):
     """Return the graph's Layer1, or raise with the list of open graphs."""
-    layer = get_origin().FindGraphLayer(f"[{graph_name}]Layer1")
+    # Layer1 can be renamed by the user or a figure template. Resolve by the
+    # shared fresh-handle path, which also has a page/index fallback.
+    from .tools.style_helpers import _find_layer_com
+    layer = _find_layer_com(get_origin(), graph_name)
     if layer is None:
         graphs = ", ".join(graph_names()) or "(none)"
         msg = f"Graph '{graph_name}' not found. Open graphs: {graphs}."

@@ -13,6 +13,28 @@ call through any tool silently no-ops or looks wrong on a loaded/reloaded
 graph — most of these gotchas explain a "success" message that didn't do
 anything.
 
+## Current contract and evidence boundary
+
+Origin 2026 synthetic tests verify `-wp` physical widths, renamed layers,
+right-Y y2/YR targeting, unchanged existing ranges/ticks/layout, repeatable
+configuration, explicit matrix coordinates and native SVG/PDF. Read back with
+`inspect_graph`; use `configure_layer` for structured per-property diagnostics.
+An executed command is not a visual verification. Retain export inspection.
+
+For grouped stacks, use `set_group_edit_mode(independent=True)` to retain plot
+types and stacking. Do not rebuild stacks with the legacy `ungroup_plots` tool.
+Create categorical matrices with explicit X/Y bounds and verify via matrix -pg;
+row/column counts do not set those bounds.
+
+SVG is available on the tested Origin 2026 installation. Any older no-SVG
+observation in this document is specific to the old tested installation. Export
+capability is checked by a fresh output and file signature, not version number.
+Optional PowerPoint processing converts only a safe rectangular-mask subset and
+keeps the native SVG. Unsupported masks fail explicitly.
+
+The remaining Origin 2020 quirks below are historical probes. They have not all
+been revalidated on 2026 and must not be described as universal limitations.
+
 ## P8: never batch `-flag`s in one `set` command
 
 Probe-confirmed on Origin 2020: combining multiple `-flag`s in ONE
@@ -38,7 +60,8 @@ single most common mistake when styling from raw LabTalk:
 
 | LabTalk flag | What it sets | Unit |
 | --- | --- | --- |
-| `set <ds> -w <n>` | data-line width | ~200 units per point (500 ≈ 2.5pt) |
+| `set <ds> -wp <n>` | data-line width | POINTS directly (Origin 2026 round-trip verified) |
+| `set <ds> -w <n>` | data-line width | 500 units per point (1500 = 3 pt); prefer `-wp` |
 | `set <er> -erw <n>` | error-bar LINE width | POINTS directly |
 | `set <er> -erwc <n>` | error-bar CAP (whisker) width | POINTS directly |
 
@@ -97,14 +120,18 @@ YR.fsize=35;                             // title size
 For layer 1, the LEFT title colors via `YL.color=color(...)` (`layer.y.color`
 alone colors only layer 1's line + ticks, not its title).
 
-## Layer-2 `set -w` protocol (connecting-line width on the right axis)
+## Layer-2 width and coordinate units
 
-Layer-2 line width via `set <ds> -w <n>` looks non-deterministic ("flaky")
-unless you follow the full protocol: `win -a <graph>; page.active=2;
-set <ds> -w <n>; doc -uw;` plus a ~2s settle (5/5 repeats identical live). It
-SATURATES around `-w 8` (`w=8` and `w=20` render identically) — to exceed
-that thickness, plot a scaled copy of the data on layer 1 and style it there
-with `set_plot_style(line_width=...)` instead.
+The old apparent saturation of tiny `-w` values was not evidence of a universal
+line-width limit. Use `set_plot_style(line_width=..., layer_id=...)`, which prefers
+`-wp` and verifies physical points. Never duplicate or scale source data to work
+around a style problem. The 200-units/pt estimate has been superseded by Origin
+2026 readback and the documented 500 raw units/pt.
+
+Right-Y children use parent-layer percent by default: 0/0/100/100 overlaps the
+parent. `set_layer_geometry` has explicit units and layer selectors; the parent
+ResizeParent coupling is temporarily disabled for child edits. Fresh child
+geometry can require a bounded retry after its initial initialization.
 
 ## Settle race after page creation
 

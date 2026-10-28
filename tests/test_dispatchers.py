@@ -62,12 +62,12 @@ def _registry():
     return mcp._tool_manager._tools
 
 
-def test_registry_has_exactly_45_tools():
+def test_registry_has_expected_tools():
     # 43 Origin tools + list_skills + get_skill = 45. N7 added ungroup_plots and
     # folded per-plot RGB into set_plot_style (dropping set_plot_color /
     # set_plot_line_width) and removed set_column_designation (use
     # manage_columns op="properties"), netting back to 45.
-    assert len(_registry()) == 45
+    assert len(_registry()) == 51
 
 
 def test_eight_new_dispatchers_registered():
@@ -399,6 +399,20 @@ def test_colormap_requires_both_bounds(fake_origin):
 
 # --- export_graph: 2 branches -------------------------------------------------
 
+def _fake_file_export(fake_origin,monkeypatch):
+    import re
+    from pathlib import Path
+    original=fake_origin.Execute
+    def export(script):
+        result=original(script)
+        if script.startswith('expGraph'):
+            folder=re.search(r'path:="([^"]+)"',script)[1]
+            name=re.search(r'filename:="([^"]+)"',script)[1]
+            fmt=re.search(r'type:=(\w+)',script)[1]
+            Path(folder,name+'.'+fmt).write_bytes(b'%PDF-1.4\n' if fmt=='pdf' else b'exported synthetic image')
+        return result
+    monkeypatch.setattr(fake_origin,'Execute',export)
+
 def test_export_graph_plain_equiv(fake_origin, tmp_path):
     # The fake can't produce a real file, so the file-existence check fails;
     # the unknown-graph guard path exercises the same code in both impl and
@@ -413,8 +427,7 @@ def test_export_graph_default_is_clipboard_free(fake_origin, tmp_path, monkeypat
     # The default export (sized=False) must issue an expGraph LabTalk command
     # (clipboard-free) and never touch CopyPage. Pretend the file was written
     # so the impl's existence/size checks pass under the fake.
-    monkeypatch.setattr(G.os.path, "exists", lambda _p: True)
-    monkeypatch.setattr(G.os.path, "getsize", lambda _p: 12345)
+    _fake_file_export(fake_origin,monkeypatch)
     p = str(tmp_path / "fig.png")
     fake_origin.executed.clear()
     msg = G.export_graph("Graph1", p)
@@ -429,8 +442,7 @@ def test_export_graph_vector_pdf_emits_no_pixel_size(fake_origin, tmp_path, monk
     # Vector formats are resolution-independent: expGraph must be called with
     # type:=pdf and NO tr1 pixel-size options (probe-verified those make the
     # command fail on Origin 2020).
-    monkeypatch.setattr(G.os.path, "exists", lambda _p: True)
-    monkeypatch.setattr(G.os.path, "getsize", lambda _p: 3416)
+    _fake_file_export(fake_origin,monkeypatch)
     p = str(tmp_path / "fig.pdf")
     fake_origin.executed.clear()
     msg = G.export_graph("Graph1", p, format="pdf")
@@ -442,8 +454,7 @@ def test_export_graph_vector_pdf_emits_no_pixel_size(fake_origin, tmp_path, monk
 
 
 def test_export_graph_raster_still_sizes(fake_origin, tmp_path, monkeypatch):
-    monkeypatch.setattr(G.os.path, "exists", lambda _p: True)
-    monkeypatch.setattr(G.os.path, "getsize", lambda _p: 12345)
+    _fake_file_export(fake_origin,monkeypatch)
     p = str(tmp_path / "fig.tif")
     fake_origin.executed.clear()
     G.export_graph("Graph1", p, format="tif")
@@ -455,8 +466,7 @@ def test_export_graph_raster_still_sizes(fake_origin, tmp_path, monkeypatch):
 def test_export_graph_explicit_width_routes_to_sized(fake_origin, tmp_path, monkeypatch):
     # Item 10: an explicit width (no sized=True) must reach the sized export
     # and emit that pixel width — never silently ignored.
-    monkeypatch.setattr(G.os.path, "exists", lambda _p: True)
-    monkeypatch.setattr(G.os.path, "getsize", lambda _p: 999)
+    _fake_file_export(fake_origin,monkeypatch)
     p = str(tmp_path / "fig.png")
     fake_origin.executed.clear()
     G.export_graph("Graph1", p, width=1600)
@@ -464,14 +474,15 @@ def test_export_graph_explicit_width_routes_to_sized(fake_origin, tmp_path, monk
     assert "tr1.width:=1600" in cmds
 
 
-def test_export_graph_rejects_svg(fake_origin, tmp_path):
-    # SVG proved out UNSUPPORTED on Origin 2020 — must be rejected up front.
+def test_export_graph_unavailable_svg_reports_failure(fake_origin, tmp_path):
+    # Support is determined by a fresh export, not a blanket version blacklist.
     p = str(tmp_path / "fig.svg")
     with pytest.raises(ValueError):
         G.export_graph("Graph1", p, format="svg")
 
 
-def test_export_graph_sized_equiv(fake_origin, tmp_path):
+def test_export_graph_sized_equiv(fake_origin, tmp_path,monkeypatch):
+    monkeypatch.setattr(G.uuid,'uuid4',lambda:SimpleNamespace(hex='fixed_for_equivalence'))
     p = str(tmp_path / "fig.png")
     _assert_equiv(fake_origin,
                   G._export_graph_sized_impl, ("Graph1", p),

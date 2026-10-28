@@ -103,7 +103,7 @@ def _kill_lockfile_daemon(lockfile: str) -> None:
         if not pid:
             continue
         try:
-            os.kill(int(pid), signal.SIGKILL)
+            os.kill(int(pid), getattr(signal,'SIGKILL',signal.SIGTERM))
         except (OSError, ProcessLookupError):
             pass
 
@@ -128,7 +128,7 @@ def test_shim_schema_is_byte_identical_for_all_tools():
     # the shim, not forwarded, but must still be schema-identical to the
     # in-process server).
     assert set(shim_tools) == set(real_tools)
-    assert len(shim_tools) == 45
+    assert len(shim_tools) == 51
 
     for name, real in real_tools.items():
         fwd = shim_tools[name].fn

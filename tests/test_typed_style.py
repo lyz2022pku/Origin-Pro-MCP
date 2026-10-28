@@ -169,7 +169,7 @@ def test_set_plot_style_line_width_only_emits_only_dash_w(fake_origin):
     fake_origin.lt_vars["__mcpk"] = 1  # this IS a symbol plot
     set_plot_style("Graph1", plot_index=1, line_width=5)
     layer = origin_connection.get_origin()._graph_layers["[Graph1]Layer1"]
-    assert any("set Book1_B -w 1000;" == s for s in layer.executed)
+    assert any("set Book1_B -wp 5;" == s for s in layer.executed)
     assert not any("-k " in s or "-z " in s or "-kf " in s for s in layer.executed)
 
 
@@ -447,7 +447,7 @@ def test_create_matrix_raises_on_dim_mismatch(fake_origin):
 def test_set_graph_font_raises_on_execute_failure(fake_origin):
     from origin_pro_mcp.tools import style as S
 
-    fake_origin.execute_results["xb.font$"] = False
+    fake_origin.execute_results["xb.font"] = False
     with pytest.raises(ValueError, match="x-axis title font"):
         S.set_graph_font("Graph1", target="axes")
 

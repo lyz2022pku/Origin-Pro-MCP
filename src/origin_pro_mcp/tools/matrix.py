@@ -71,8 +71,25 @@ def _create_matrix_book(name: str) -> str:
     return get_lt_str("page.name$")
 
 
+def read_matrix_coordinates(book_name: str) -> dict:
+    """Read native X/Y mapping using matrix -pg, not unsupported wks.x1."""
+    from .graph_context import numeric
+    safe=labtalk_name(book_name,'book_name')
+    require_matrix(safe)
+    execute_labtalk(f'win -a {safe};')
+    result={}
+    for axis in ['x','y']:
+        lo='__mcp_'+axis+'1';hi='__mcp_'+axis+'2'
+        ok=execute_labtalk(f'{lo}=0/0; {hi}=0/0; matrix -pg {axis.upper()} {lo} {hi};')
+        result[axis+'1']=numeric(get_origin().LTVar(lo)) if ok else None
+        result[axis+'2']=numeric(get_origin().LTVar(hi)) if ok else None
+    return result
+
+
 @mcp.tool()
-def create_matrix(book_name: str, rows: int = 10, cols: int = 10) -> str:
+def create_matrix(book_name: str, rows: int = 10, cols: int = 10,
+                  x_min: float | None = None, x_max: float | None = None,
+                  y_min: float | None = None, y_max: float | None = None) -> str:
     """Create a new matrix book in Origin.
 
     Matrices back 3D surface, contour, heatmap, and image plots.
@@ -90,8 +107,16 @@ def create_matrix(book_name: str, rows: int = 10, cols: int = 10) -> str:
     safe_book = labtalk_name(book_name, "book_name")
     safe_rows = positive_int(rows, "rows")
     safe_cols = positive_int(cols, "cols")
+    from .graph_context import finite
+    coords = {'x1':x_min, 'x2':x_max, 'y1':y_min, 'y2':y_max}
+    if any(v is not None for v in coords.values()) and not all(v is not None for v in coords.values()):
+        raise ValueError('Provide all four matrix coordinate bounds together.')
+    coords = {k:finite(v,k) for k,v in coords.items() if v is not None}
+    if coords and (coords['x2']<=coords['x1'] or coords['y2']<=coords['y1']):
+        raise ValueError('Matrix maxima must exceed minima.')
     name = _create_matrix_book(safe_book)
-    if not execute_labtalk(f"win -a {name}; mdim cols:={safe_cols} rows:={safe_rows};"):
+    coord_opts = ''.join(f' {k}:={v:g}' for k,v in coords.items())
+    if not execute_labtalk(f"win -a {name}; mdim cols:={safe_cols} rows:={safe_rows}{coord_opts};"):
         msg = f"Origin could not size matrix '{name}' to {safe_cols}x{safe_rows}."
         raise ValueError(msg)
     # Verify mdim took by reading the dims back (wks.nrows/ncols on the active
@@ -109,13 +134,25 @@ def create_matrix(book_name: str, rows: int = 10, cols: int = 10) -> str:
             f"read back {int(round(got_cols))}x{int(round(got_rows))}."
         )
         raise ValueError(msg)
-    return json.dumps({
+    coordinate_check = {}
+    if coords:
+        from .graph_context import check, numeric
+        actual_coords=read_matrix_coordinates(name)
+        for k,v in coords.items():
+            actual = actual_coords[k]
+            coordinate_check[k] = check(v,actual)
+        if any(c['status'] == 'not_applied' for c in coordinate_check.values()):
+            raise ValueError(f'Matrix coordinate bounds did not take: {coordinate_check}')
+    result = {
         "name": name,
         "requested_name": safe_book,
         "renamed": name != safe_book,
         "rows": safe_rows,
         "cols": safe_cols,
-    })
+    }
+    if coords:
+        result['coordinate_verification'] = coordinate_check
+    return json.dumps(result)
 
 
 @mcp.tool()
@@ -177,7 +214,7 @@ def set_matrix_data(book_name: str, data: str) -> str:
 
 
 @mcp.tool()
-def get_matrix_data(book_name: str) -> str:
+def get_matrix_data(book_name: str, include_coordinates: bool = False) -> str:
     """Read a matrix back as JSON.
 
     Args:
@@ -197,10 +234,13 @@ def get_matrix_data(book_name: str) -> str:
         msg = f"Matrix {target} not found. Open matrices: {mats}."
         raise ValueError(msg)
     rows = [
-        [None if _is_missing_cell(v) else v for v in row]
+        [None if v is None or v == '' or _is_missing_cell(v) else v for v in row]
         for row in data
     ]
-    return json.dumps({"rows": rows})
+    result={"rows":rows}
+    if include_coordinates:
+        result['coordinates']=read_matrix_coordinates(safe_book)
+    return json.dumps(result)
 
 
 @mcp.tool()

@@ -251,7 +251,7 @@ This is an accident-prevention guard, not a security sandbox for untrusted code.
   Use `layer.<ax>.ticks = 0` (or `axis(op="tick", axis="top"/"right",
   tick_direction="none")`) to remove tick marks instead.
 - **Units differ between line width and error-bar width.** `set -w` is
-  ~200 units per point (500 = 2.5pt); error bars use `-erw <points>` /
+  500 units per point (1500 = 3 pt); prefer `-wp` in points; error bars use `-erw <points>` /
   `-erwc <cap width>` directly in points — do not reuse the `-w` scale for
   error bars, and never style them via a bare `set -w`/`-ew`.
   `set_plot_style(error_bar_width=, error_cap_width=)` handles the units.
@@ -267,6 +267,75 @@ This is an accident-prevention guard, not a security sandbox for untrusted code.
   2=circle, 3=triangle-up, 4=triangle-down, 5=diamond, 6=plus, 7=x/cross,
   8=asterisk. Codes 9-12 render as a dash/vertical-bar/literal glyph, not
   useful marker shapes.
+
+## Graph editing contract (Origin 2026)
+
+The current synthetic Windows/Origin 2026 tests verify point-unit line widths,
+named layers, right-Y scale/title targeting, state preservation, repeatability,
+matrix coordinate mapping, SVG/PDF export and template reuse. Older Origin 2020
+observations below are historical evidence, not a claim that every restriction
+applies to every later release. The fallback paths are unit-tested; Origin 2020
+has not been re-tested with this change.
+
+- Existing tool names and positional arguments remain available. Graph/axis,
+  plot, font, tick, geometry and colormap edits accept `layer_index` (1-based)
+  or `layer_id` (an Origin layer name saved in the project). Conflicting selectors
+  raise. Omission preserves the legacy first-layer target; the legacy right-title
+  convenience still chooses layer 2 when no layer selector is supplied.
+- Line widths are points. `set_plot_style` probes `get -wp` before using `set -wp`,
+  then verifies the result. A build without that flag uses documented 500-unit
+  `-w` conversion only when raw width is readable, and identifies that fallback.
+  The previous 200-unit factor was incorrect on the tested Origin 2026 install:
+  requesting 3 pt produced 1.2 pt. Do not compensate in the data or duplicate plots.
+- `add_second_y_axis` reuses `layer_id="mcpRightY"`. Ranges, tick increments and
+  existing layout are restored and checked by default. `auto_rescale=True` and
+  `rebuild_legend=True` are explicit options. A conflicting existing binding is
+  rejected. The new layer's generated legend is hidden; the original legend is kept.
+- Use `units="page_percent"`, `"parent_percent"`, `"inch"`, `"cm"`, `"mm"`,
+  `"point"` or `"pixel"` for geometry. `"current"` keeps legacy behavior.
+  A linked overlapping child is 0/0/100/100 in parent percent. Child geometry edits
+  temporarily disable ResizeParent so the parent does not move. New-layer writes
+  use bounded readback retries instead of assuming COM success means a change.
+- `configure_layer` returns requested values, actual values, verified/not_applied/
+  unverifiable status, and summary lists. `inspect_graph` returns null for missing
+  properties. Property readback does not prove correct appearance; inspect exports.
+  `set_plot_style(diagnostics=True)` provides the same structured report for
+  requested plot properties while its default return text remains compatible.
+- `export_graph` supports area=page/content/layer/plot_area. Layer selections require
+  SVG or PDF and explicit layer identity. SVG crops require recognized Origin semantic
+  layer/plot scopes. Plot-area export removes complete axis/text objects before
+  clipping, avoiding leftover letter fragments. No source values or plot layout are
+  changed. Origin can remember export preferences internally.
+- `powerpoint_compatible=True` is SVG-only. It converts only opaque white rectangular
+  masks with recognized units and no transforms/CSS effects. Other masks cause an
+  explicit error. Derived outputs keep a `.native.svg` original; conversion is never
+  an unconditional text replacement. Synthetic PowerPoint-to-PDF tests retained vector
+  drawings on all five representative pages with zero raster images.
+- Cropped PDF and content-bound layer SVG require the optional `vector` extra:
+  `pip install '.[vector]'`. Native whole-page SVG/PDF do not need it. Cropped PDF uses
+  MuPDF's SVG-to-PDF conversion; inspect font appearance separately.
+- `ungroup_plots` is a legacy rebuilding operation. It now refuses stacked/non-XY or
+  error-bar graphs. Prefer `set_group_edit_mode` for independent in-place styling.
+- Matrix creation accepts all four explicit coordinate bounds; `matrix -pg` verifies
+  them. Dimensions alone do not establish coordinates. `get_matrix_data` optionally
+  includes coordinates. Missing/empty worksheet and matrix cells are JSON null,
+  including empty strings, NaN and Origin sentinels.
+
+Templates are stored in `src/origin_pro_mcp/templates/figure_templates.v1.json`.
+Families cover XY with explicit error bars, shared-X dual-Y, main+inset,
+grouped stacked columns (caller supplies group X positions), and heatmaps with
+linear/log10/symmetric zero-centered color scales. Data mappings refer to existing
+books/matrices; no statistics, jitter, resampling or new source data are inferred.
+Error bars require explicit SD/SEM/CI provenance. Zero-centered limits are explicit
+and symmetric; choose a suitable diverging palette when needed.
+
+Style defaults are empty. `large_source_arial` is an optional source-figure profile
+(Arial Bold, 32 pt titles, 28 pt ticks, 3 pt axes), not a journal requirement.
+Final physical size, scaled text and readability must be checked separately.
+Legacy `apply_publication_style` retains its existing opt-in styling behavior.
+
+See [examples/verified_graph_workflow.py](examples/verified_graph_workflow.py) and
+[docs/GRAPH_CONTRACT.md](docs/GRAPH_CONTRACT.md) for schemas, verification and limits.
 
 ## Architecture
 
@@ -312,11 +381,21 @@ cd src && /mnt/c/.../python.exe -m origin_pro_mcp.cli list_worksheets
 The CLI reflects over the same tool registry as the MCP server, so it
 always exposes exactly the tools listed below.
 
-## Available Tools (45 total)
+## Available Tools (51 total)
 
 Several tools are **dispatchers**: one tool name with an `op`/`kind`/`method`
 argument that selects the specific action, so a handful of tools cover what
 used to be many single-purpose ones.
+
+### Verified graph editing and templates
+| Tool | Description |
+|------|-------------|
+| `inspect_graph` | Read every layer, source dataset, axes/ticks/fonts/titles, line width, legend and physical page size in one response; unreadable values are null |
+| `configure_layer` | Apply a JSON patch to explicitly selected axes/geometry and return requested/actual/status diagnostics |
+| `ensure_graph_layer` | Reuse a persistent layer name, overlap the parent, and optionally share X 1:1 |
+| `set_group_edit_mode` | Edit a group independently in place; preserve stacking, plot type and error bars |
+| `list_figure_templates` | List generic versioned families and optional style profiles |
+| `apply_figure_template` | Keep data mapping, layout and style separate; reuse owned objects on repeated calls |
 
 ### Project Management
 | Tool | Description |
@@ -375,7 +454,7 @@ used to be many single-purpose ones.
 | `axis` | Configure axes — `op="labels"/"range"/"scale"/"tick"/"frame"`; `op="labels"` also sets the right/top-axis title on `axis="right"/"top"` |
 | `annotate` | Add an annotation — `kind="reference_line"/"text"/"line"/"arrow"` |
 | `colormap` | Apply a palette and/or set the Z color-scale range on a colormapped graph |
-| `export_graph` | Export to an image file — raster (png/jpg/tif/bmp) or vector (pdf/eps/emf, resolution-independent); `width=` sets an exact pixel width for raster (default ~1200px wide, height follows the graph's aspect ratio) |
+| `export_graph` | Export to an image file — raster (png/jpg/tif/bmp) or vector (svg/pdf/eps/emf, resolution-independent); semantic SVG/PDF crops and optional conservative PowerPoint SVG processing; `width=` sets an exact pixel width for raster (default ~1200px wide, height follows the graph's aspect ratio) |
 | `ungroup_plots` | Break a plot group so each curve can be colored independently |
 
 ### Styling

@@ -8,6 +8,8 @@ from .tools import fitting  # noqa: F401
 from .tools import project  # noqa: F401
 from .tools import matrix  # noqa: F401
 from .tools import analysis  # noqa: F401
+from .tools import graph_edit  # noqa: F401
+from .tools import figure_templates  # noqa: F401
 
 from .skills import register_skills
 

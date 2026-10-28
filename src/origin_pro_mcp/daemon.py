@@ -824,7 +824,16 @@ def write_lockfile(path: str, port: int, token: str, pid: int,
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
-    os.replace(tmp, path)
+    for attempt in range(4):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            # A Windows reader can briefly deny delete-sharing while polling
+            # the ledger. Keep the atomic write and retry the same temp file.
+            if attempt == 3:
+                raise
+            time.sleep(0.01 * (attempt + 1))
     if sys.platform != "win32":
         os.chmod(path, 0o600)
 
@@ -879,7 +888,16 @@ def write_sessions(path: str, data: dict) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
-    os.replace(tmp, path)
+    for attempt in range(4):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            # Match lockfile writes: a concurrently polling Windows reader
+            # can briefly deny delete-sharing. Retry without losing the update.
+            if attempt == 3:
+                raise
+            time.sleep(0.01 * (attempt + 1))
     if sys.platform != "win32":
         os.chmod(path, 0o600)
 

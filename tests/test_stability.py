@@ -29,6 +29,7 @@ def test_spawn_log_roundtrip(tmp_path):
 
 def test_startup_sweep_kills_spawnlog_orphans(tmp_path, monkeypatch):
     monkeypatch.setenv("ORIGIN_PRO_MCP_SWEEP_ORPHANS", "1")
+    monkeypatch.setattr('origin_pro_mcp.daemon._origin_process_pids',lambda:set())
     log = str(tmp_path / "spawned-pids.log")
     record_spawned_pid(4242, log)
     record_spawned_pid(4243, log)
@@ -48,6 +49,7 @@ def test_startup_sweep_kills_spawnlog_orphans(tmp_path, monkeypatch):
 
 def test_startup_sweep_skips_dead_pids(tmp_path, monkeypatch):
     monkeypatch.setenv("ORIGIN_PRO_MCP_SWEEP_ORPHANS", "1")
+    monkeypatch.setattr('origin_pro_mcp.daemon._origin_process_pids',lambda:set())
     log = str(tmp_path / "spawned-pids.log")
     record_spawned_pid(500, log)
     record_spawned_pid(501, log)

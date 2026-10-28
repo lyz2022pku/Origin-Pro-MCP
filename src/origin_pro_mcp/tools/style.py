@@ -1,3 +1,4 @@
+from .graph_context import layer_targeted, selected_index, explicit_selection
 from ..app import mcp
 import time
 
@@ -49,9 +50,9 @@ COLOR_MAP = {
     "purple": 13, "gray": 8, "grey": 8,
 }
 
-# LabTalk `set -w` line-width units are tiny (~200 units per point,
-# calibrated visually on Origin 2020) — NOT points*10.
-_WIDTH_UNITS_PER_POINT = 200
+# Documented raw -w units, also confirmed by Origin 2026 get -wp/-w readback.
+# The historical visual estimate of 200 units/pt was incorrect on that build.
+_WIDTH_UNITS_PER_POINT = 500
 
 # Publication-style line/symbol defaults for apply_publication_style,
 # tuned visually on Origin 2020 for journal figures. Edit these to match
@@ -60,7 +61,7 @@ _WIDTH_UNITS_PER_POINT = 200
 _PUB_LINE_WIDTH_PT = 3.0        # data series line width (points)
 _PUB_SYMBOL_SIZE = 14           # data symbol size
 # Error-bar geometry. `set -erw` is in POINTS (unlike the data line's
-# `-w`, which is ~200 units/pt), and `-erwc` is the cap (whisker) width.
+# `-w`, which is 500 raw units/pt), and `-erwc` is the cap (whisker) width.
 # Both verified on Origin 2020 — earlier "blow-ups" were a units mistake
 # (passing -w-scale values into -erw), not an Origin limitation.
 _PUB_ERROR_BAR_WIDTH_PT = 2.5            # error-bar line width (points, via -erw)
@@ -160,8 +161,9 @@ def _set_axis_title_verified(
     safe = labtalk_string("\\b(" + label_text + ")", obj)
     for attempt in range(3):
         activate_window(graph_name, "graph_name")
+        execute_labtalk(f"page.active={selected_index(graph_name)};")
         execute_labtalk(
-            f'{obj}.text$ = {safe}; {obj}.fsize = {font_size}; {obj}.font$ = "Arial";'
+            f'{obj}.text$ = {safe}; {obj}.fsize = {font_size}; {obj}.font = font(Arial);'
         )
         got = get_lt_str(f"{obj}.text$") or ""
         if label_text in got:
@@ -172,6 +174,7 @@ def _set_axis_title_verified(
 
 
 @mcp.tool()
+@layer_targeted
 def set_plot_style(
     graph_name: str,
     plot_index: int = 1,
@@ -183,6 +186,9 @@ def set_plot_style(
     open_symbol: bool | None = None,
     error_bar_width: float | None = None,
     error_cap_width: float | None = None,
+    diagnostics: bool = False,
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Set line/symbol/error-bar style for a data plot. Only the aspects you
     pass are touched — everything else on that curve is left exactly as it
@@ -257,6 +263,12 @@ def set_plot_style(
         raise ValueError(msg)
 
     pname = data_plots[idx]
+    # A repeated source dataset can occur twice in the same layer. Name-based
+    # set would edit both copies; use a positional range only in that case.
+    target = pname
+    if sum(p['name'] == pname for p in infos) > 1:
+        pos = [i+1 for i,p in enumerate(infos) if not p['is_error']][idx]
+        target = f'[{safe_graph_name}]{selected_index(safe_graph_name)}!{pos}'
 
     # Resolve the color expression: explicit rgb overrides a named color.
     c = None
@@ -280,6 +292,10 @@ def set_plot_style(
             "error_bar_width, or error_cap_width."
         )
         raise ValueError(msg)
+    from .graph_context import finite
+    for field,value in [('line_width',line_width),('symbol_size',symbol_size),('error_bar_width',error_bar_width),('error_cap_width',error_cap_width)]:
+        if value is not None:
+            finite(value,field,positive=True)
 
     # Target the EXACT plot by its DATASET NAME (`set <name> ...`) run on the
     # graph's Layer1 COM object (graph_layer_execute -> gl.Execute). Verified on
@@ -290,7 +306,12 @@ def set_plot_style(
     # graphs and froze all styling there. gl.Execute + the dataset name needs
     # neither an active window nor plot selection.
     def _set(dataset: str, spec: str) -> None:
-        graph_layer_execute(safe_graph_name, f"set {dataset} {spec};")
+        prefix=''
+        if dataset.startswith('['):
+            prefix=f'range __mcp_plot={dataset}; '
+            dataset='__mcp_plot'
+        if not graph_layer_execute(safe_graph_name, f"{prefix}set {dataset} {spec};"):
+            raise ValueError(f"Origin rejected plot style {spec}.")
 
     # P8 HARD RULE (probe-verified): one flag per `set` call. Combining `-c` +
     # `-cf` in one command wipes the plot to black; `-k`+`-kf`+`-z` combined
@@ -298,8 +319,12 @@ def set_plot_style(
     flags: list[str] = []
     if c is not None:
         flags.append(f"-c {c}")
+    width_check = None
     if line_width is not None:
-        flags.append(f"-w {int(line_width * _WIDTH_UNITS_PER_POINT)}")
+        from .graph_context import set_width_points
+        width_check, width_method = set_width_points(safe_graph_name, target, line_width)
+        if width_check['status'] == 'not_applied':
+            raise ValueError(f"Line width did not take: {width_check}")
     has_symbols = _plot_has_symbols(pname)
     if touch_symbols and has_symbols:
         if symbol_shape is not None:
@@ -316,7 +341,7 @@ def set_plot_style(
         flags.append(f"-cf {c}")
 
     for flag in flags:
-        _set(pname, flag)
+        _set(target, flag)
     if flags:
         time.sleep(0.2)
 
@@ -333,13 +358,46 @@ def set_plot_style(
         # data plot exists — grouping only matters when there's more than one.
         grouping_note = (
             "; NOTE: if these plots are GROUPED, per-plot color/width/symbol "
-            "changes may be overridden by the group — call ungroup_plots "
-            "first if the style doesn't look right"
+            "changes may be overridden by the group — use set_group_edit_mode "
+            "for independent styling without rebuilding"
         )
-    return (
+    message = (
         f"Updated style for plot {plot_index} ({pname}) in "
         f"{safe_graph_name}{error_note}{grouping_note}"
+        + (f"; line_width readback: {width_check}" if width_check else "")
     )
+    if diagnostics:
+        import json
+        from .graph_context import check,read_plot_option,read_number,report
+        properties={}
+        if width_check is not None:
+            properties['line_width_pt']=width_check
+            properties['line_width_pt']['method']=width_method
+        for key,value,flag in [('symbol_size_pt',symbol_size,'z'),('symbol_shape',symbol_shape,'k'),('open_symbol',int(open_symbol) if open_symbol is not None else None,'kf')]:
+            if value is not None:
+                expected=SYMBOL_SHAPES.get(plot_index,2) if key=='symbol_shape' and value==0 else value
+                properties[key]=check(expected,read_plot_option(safe_graph_name,target,flag))
+        if c is not None:
+            resolved=read_number(safe_graph_name,str(c))
+            properties['color']=check(resolved,read_plot_option(safe_graph_name,target,'c'))
+            properties['color']['requested_color']=rgb or color
+        if error_bar_width is not None or error_cap_width is not None:
+            position=next(i for i,p in enumerate(infos) if p['name']==pname)
+            error_positions=[]
+            for i in range(position+1,len(infos)):
+                if not infos[i]['is_error']:break
+                error_positions.append(i)
+            if not error_positions:
+                error_positions=[i for i,p in enumerate(infos) if p['is_error']]
+            for i in error_positions:
+                error_target=f'[{safe_graph_name}]{selected_index(safe_graph_name)}!{i+1}'
+                for key,value,flag in [('width_pt',error_bar_width,'erw'),('cap_width_pt',error_cap_width,'erwc')]:
+                    if value is not None:
+                        properties[f'error_plot_{i+1}.{key}']=check(value,read_plot_option(safe_graph_name,error_target,flag))
+        result=report(safe_graph_name,selected_index(safe_graph_name),properties)
+        result['message']=message
+        return json.dumps(result)
+    return message
 
 
 def _apply_error_bar_style(
@@ -412,15 +470,21 @@ def _parse_rgb(rgb: str):
 
 
 @mcp.tool()
-def ungroup_plots(graph_name: str, plot_type: str = "line") -> str:
+@layer_targeted
+def ungroup_plots(graph_name: str, plot_type: str = "line",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
+) -> str:
     """Break a plot group so each curve can be colored independently.
 
-    Origin 2020 has NO working ungroup command: `layer -g` only GROUPS (there is
+    Historical Origin 2020 probes found no working ungroup command: `layer -g` only GROUPS (there is
     no ungroup toggle), verified exhaustively. While plots are grouped, the
     group's color increment overrides per-curve `set_plot_style` color. The only
     reliable fix (spike-verified on Origin 2020) is to remove the grouped plots
     and re-plot each source dataset on its own — separate plots are NOT grouped.
-    This preserves the data and the X axis but RESETS each curve to `plot_type`
+    This legacy rebuild is refused for non-XY types and error bars. Prefer
+    set_group_edit_mode for safe independent editing. It preserves the X
+    axis but RESETS each eligible curve to `plot_type`
     (re-style afterward with set_plot_style). Best used before styling.
 
     Args:
@@ -438,6 +502,10 @@ def ungroup_plots(graph_name: str, plot_type: str = "line") -> str:
     # loaded-graph freeze) rather than reporting a no-op ungroup as success.
     infos, data_names = require_data_plots(safe_graph)
     has_error = any(p["is_error"] for p in infos)
+    from .graph_context import read_number
+    types = [read_number(safe_graph,f'layer.plot{i+1}.pid') for i,p in enumerate(infos) if not p['is_error']]
+    if has_error or any(t not in {200,201,202} for t in types):
+        raise ValueError('Rebuilding would change plot types, stacking or error bars. Use set_group_edit_mode(independent=True) to edit the existing group in place.')
     # Remove every plot, then re-plot each DATA dataset on its own. Run on the
     # Layer1 COM object (gl.Execute) so it works without an active window (win -a
     # fails on .opju-loaded graphs). `plotxy iy:=<dataset>` reuses the sheet's X
@@ -450,7 +518,7 @@ def ungroup_plots(graph_name: str, plot_type: str = "line") -> str:
     for name in data_names:
         if graph_layer_execute(
             safe_graph,
-            f"plotxy iy:={name} plot:={ptype} ogl:=[{safe_graph}]Layer1;",
+            f"plotxy iy:={name} plot:={ptype} ogl:=[{safe_graph}]" + (f"{selected_index(safe_graph)}!;" if explicit_selection(safe_graph) else "Layer1;"),
         ):
             rebuilt += 1
         else:
@@ -484,6 +552,7 @@ def ungroup_plots(graph_name: str, plot_type: str = "line") -> str:
 
 
 @mcp.tool()
+@layer_targeted
 def apply_publication_style(
     graph_name: str,
     x_label: str = "",
@@ -493,7 +562,9 @@ def apply_publication_style(
     y_min: float | None = None,
     y_max: float | None = None,
     legend_entries: str = "",
-    legend_position: str = "top-right"
+    legend_position: str = "top-right",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Apply complete publication styling to a graph in ONE call.
 
@@ -532,6 +603,7 @@ def apply_publication_style(
     )
     require_graph(safe_graph_name)
     activate_window(safe_graph_name, "graph_name")
+    execute_labtalk(f"page.active={selected_index(safe_graph_name)};")
     plot_infos = get_plot_info(safe_graph_name)
 
     # 1. Axis titles — bold, Arial 28pt. Written through the read-back-gated
@@ -618,9 +690,11 @@ def apply_publication_style(
         shape = SYMBOL_SHAPES.get(data_index + 1, 2)
         data_index += 1
 
-        line_width_units = int(_PUB_LINE_WIDTH_PT * _WIDTH_UNITS_PER_POINT)
         graph_layer_execute(safe_graph_name, f"set {pname} -c {current_color};")
-        graph_layer_execute(safe_graph_name, f"set {pname} -w {line_width_units};")
+        from .graph_context import set_width_points
+        width_check, _ = set_width_points(safe_graph_name, pname, _PUB_LINE_WIDTH_PT)
+        if width_check['status'] != 'verified':
+            cosmetic_notes.append(f"line width {pname}: {width_check['status']}")
         if _plot_has_symbols(pname):
             graph_layer_execute(safe_graph_name, f"set {pname} -k {shape};")
             graph_layer_execute(safe_graph_name, f"set {pname} -z {_PUB_SYMBOL_SIZE};")
@@ -651,7 +725,7 @@ def apply_publication_style(
             execute_labtalk(f"win -a {safe_graph_name}; legend -r;")
             time.sleep(0.3)
 
-    execute_labtalk('legend.fsize = 20; legend.font$ = "Arial"; legend.background = 0;')
+    execute_labtalk('legend.fsize = 20; legend.font = font(Arial); legend.background = 0;')
     placement = place_legend_avoiding_data(safe_graph_name, safe_legend_position)
 
     moved_out = " — moved outside the frame to avoid the data" if placement.startswith("outside") else ""
@@ -743,12 +817,16 @@ def _bold_text_object(obj: str) -> None:
 
 
 @mcp.tool()
+@layer_targeted
 def set_graph_font(
     graph_name: str,
     font_name: str = "Arial",
     font_size: int = 24,
     target: str = "all",
     bold: bool = False,
+    axis_side: str = "auto",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Set font for graph elements.
 
@@ -780,47 +858,55 @@ def set_graph_font(
     safe_target = labtalk_choice(target, {"all", "axes", "title", "legend", "tick"}, "target")
     require_graph(safe_graph_name)
     activate_window(safe_graph_name, "graph_name")
+    execute_labtalk(f"page.active={selected_index(safe_graph_name)};")
 
+    from .graph_context import read_number
+    side=labtalk_choice(axis_side,{'auto','left','right'},'axis_side')
+    if side=='auto':
+        side='right' if selected_index(safe_graph_name)>1 and read_number(safe_graph_name,'layer.y.showAxes')==2 else 'left'
+    vertical_obj='yr' if side=='right' else 'yl'
+    vertical_axis='y2' if side=='right' else 'y'
     # Bold: Origin 2020 has NO `.bold` property on the axis-title/title text
     # objects (only tick labels expose `layer.x.label.bold`). Bolding a title
     # is done by wrapping its text in the `\b(...)` rich-text markup.
     if safe_target in ("all", "axes"):
-        if not execute_labtalk(f"xb.font$ = {safe_font_name}; xb.fsize = {safe_font_size};"):
+        if not execute_labtalk(f"xb.font = font({safe_font_name}); xb.fsize = {safe_font_size};"):
             msg = f"Could not set the x-axis title font on {safe_graph_name}."
             raise ValueError(msg)
-        if not execute_labtalk(f"yl.font$ = {safe_font_name}; yl.fsize = {safe_font_size};"):
+        if not execute_labtalk(f"{vertical_obj}.font = font({safe_font_name}); {vertical_obj}.fsize = {safe_font_size};"):
             msg = f"Could not set the y-axis title font on {safe_graph_name}."
             raise ValueError(msg)
         if bold:
             _bold_text_object("xb")
-            _bold_text_object("yl")
+            _bold_text_object(vertical_obj)
         # Read-back gate: LabTalk returns success even if the write hit the wrong
         # window / a frozen loaded-graph text object, so confirm the size landed.
         _verify_text_fsize("xb", safe_font_size, "x-axis title", safe_graph_name)
-        _verify_text_fsize("yl", safe_font_size, "y-axis title", safe_graph_name)
+        _verify_text_fsize(vertical_obj, safe_font_size, "y-axis title", safe_graph_name)
 
     if safe_target in ("all", "tick"):
         tick_size = max(safe_font_size - 4, 16)
-        if not graph_layer_execute(safe_graph_name, f"layer.x.label.pt = {tick_size}; layer.y.label.pt = {tick_size};"):
+        if not graph_layer_execute(safe_graph_name, f"layer.x.label.pt = {tick_size}; layer.{vertical_axis}.label.pt = {tick_size};"):
             msg = f"Could not set tick label font size on {safe_graph_name}."
             raise ValueError(msg)
+        graph_layer_execute(safe_graph_name,f'layer.x.label.font=font({safe_font_name}); layer.{vertical_axis}.label.font=font({safe_font_name});')
         tick_bold = 1 if bold else 0
         if not graph_layer_execute(
             safe_graph_name,
-            f"layer.x.label.bold = {tick_bold}; layer.y.label.bold = {tick_bold};",
+            f"layer.x.label.bold = {tick_bold}; layer.{vertical_axis}.label.bold = {tick_bold};",
         ):
             msg = f"Could not set tick-label bold on {safe_graph_name}."
             raise ValueError(msg)
 
     if safe_target in ("all", "legend"):
         legend_size = max(safe_font_size - 4, 16)
-        if not execute_labtalk(f"legend.font$ = {safe_font_name}; legend.fsize = {legend_size};"):
+        if not execute_labtalk(f"legend.font = font({safe_font_name}); legend.fsize = {legend_size};"):
             msg = f"Could not set the legend font on {safe_graph_name}."
             raise ValueError(msg)
         _verify_text_fsize("legend", legend_size, "legend", safe_graph_name)
 
     if safe_target == "title":
-        if not execute_labtalk(f"title.font$ = {safe_font_name}; title.fsize = {safe_font_size};"):
+        if not execute_labtalk(f"title.font = font({safe_font_name}); title.fsize = {safe_font_size};"):
             msg = f"Could not set the title font on {safe_graph_name}."
             raise ValueError(msg)
         if bold:
@@ -831,11 +917,14 @@ def set_graph_font(
 
 
 @mcp.tool()
+@layer_targeted
 def set_legend(
     graph_name: str,
     visible: bool = True,
     position: str = "top-right",
-    entries: str = ""
+    entries: str = "",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Configure graph legend.
 
@@ -856,6 +945,7 @@ def set_legend(
     safe_position = labtalk_choice(position, {"top-left", "top-right", "bottom-left", "bottom-right"}, "position")
     require_graph(safe_graph_name)
     activate_window(safe_graph_name, "graph_name")
+    execute_labtalk(f"page.active={selected_index(safe_graph_name)};")
 
     if not visible:
         if not execute_labtalk("legend.show = 0;"):
@@ -963,6 +1053,7 @@ _TICK_LABEL_OFFSET_PROP = {"x": "offsetV", "y": "offsetH"}
 
 
 @mcp.tool()
+@layer_targeted
 def set_tick_labels(
     graph_name: str,
     axis: str = "both",
@@ -970,6 +1061,8 @@ def set_tick_labels(
     bold: bool | None = None,
     decimal_places: int | None = None,
     offset_pct: int | None = None,
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Format an axis's tick labels: numeric format, bold, decimal places, offset.
 
@@ -997,13 +1090,13 @@ def set_tick_labels(
         Success message
     """
     safe_graph = labtalk_name(graph_name, "graph_name")
-    safe_axis = labtalk_choice(axis.lower(), {"x", "y", "both"}, "axis")
+    safe_axis = labtalk_choice(axis.lower(), {"x", "y", "both", "top", "right"}, "axis")
     require_graph(safe_graph)
     activate_window(safe_graph, "graph_name")
     if format is None and bold is None and decimal_places is None and offset_pct is None:
         msg = "Provide at least one of format, bold, decimal_places, or offset_pct."
         raise ValueError(msg)
-    axes = ["x", "y"] if safe_axis == "both" else [safe_axis]
+    axes = ["x", "y"] if safe_axis == "both" else [{"top":"x2","right":"y2"}.get(safe_axis,safe_axis)]
     changed = []
     cmds = []
     for a in axes:
@@ -1015,7 +1108,7 @@ def set_tick_labels(
         if decimal_places is not None:
             cmds.append(f"layer.{a}.label.decPlaces = {int(decimal_places)};")
         if offset_pct is not None:
-            prop = _TICK_LABEL_OFFSET_PROP[a]
+            prop = _TICK_LABEL_OFFSET_PROP[a.rstrip("2")]
             cmds.append(f"layer.{a}.label.{prop} = {int(offset_pct)};")
     if format is not None:
         changed.append("format")

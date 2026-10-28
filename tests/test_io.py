@@ -273,7 +273,9 @@ def test_export_graph_reports_uncreated_file_with_wsl_hint(fake_origin, tmp_path
     # FakeOrigin's Execute "succeeds" but no file is written: the guard must
     # turn that into a loud failure (not a stale/silent success), and since the
     # test path is POSIX it must also hint that Origin (Windows) can't reach it.
-    with pytest.raises(ValueError, match="was not created.*WSL/Linux path"):
+    import sys
+    message='was not created' if sys.platform=='win32' else 'was not created.*WSL/Linux path'
+    with pytest.raises(ValueError, match=message):
         export_graph("Graph1", str(tmp_path / "fig.png"))
 
 

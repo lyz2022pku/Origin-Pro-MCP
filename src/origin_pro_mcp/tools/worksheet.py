@@ -230,7 +230,8 @@ def get_worksheet_data(book_name: str, sheet_name: str) -> str:
     def _cell(v):
         # Origin's missing-value sentinel (~1.2e308), same convention as
         # get_matrix_data / export_worksheet.
-        if isinstance(v, (int, float)) and abs(v) >= 1e100:
+        from .matrix import _is_missing_cell
+        if v is None or v == "" or _is_missing_cell(v):
             return None
         return v
 

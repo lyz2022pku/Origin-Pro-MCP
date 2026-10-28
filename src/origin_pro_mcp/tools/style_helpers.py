@@ -20,25 +20,28 @@ def _find_layer_com(o, safe_graph_name: str):
     project file. Returns the layer or None. The second path is LIVE-UNVERIFIED
     (defensive backstop for loaded pages that don't resolve through
     ``FindGraphLayer``)."""
-    gl = o.FindGraphLayer(f"[{safe_graph_name}]Layer1")
-    if gl is not None:
-        return gl
+    from .graph_context import selected_index
+    index = selected_index(safe_graph_name)
+    gl = o.FindGraphLayer(f"[{safe_graph_name}]Layer1") if index == 1 else None
+    # A named Layer1 can be reordered away from index 1. Prefer the page's
+    # index collection whenever it is available; the direct result is only
+    # a fallback for builds that do not expose GraphPages.
     try:
         pages = o.GraphPages
         count = pages.Count
     except Exception:
-        return None
+        return gl
     for i in range(count):
         try:
             page = pages.Item(i)
             if page.Name != safe_graph_name:
                 continue
             layers = page.Layers
-            if layers.Count:
-                return layers.Item(0)
+            if layers.Count >= index:
+                return layers.Item(index - 1)
         except Exception:
             continue
-    return None
+    return gl
 
 
 def acquire_graph_layer(graph_name: str, *, activate: bool = True):
@@ -59,6 +62,10 @@ def acquire_graph_layer(graph_name: str, *, activate: bool = True):
         # Raises with the open-window list on a real Origin if the name is
         # unknown; a fresh handle is then taken against the now-active page.
         activate_window(safe_graph_name, "graph_name")
+        from .graph_context import selected_index
+        index = selected_index(safe_graph_name)
+        if not execute_labtalk(f"page.active={index};"):
+            raise ValueError(f'Could not activate layer {index} on {safe_graph_name}.')
     gl = _find_layer_com(o, safe_graph_name)
     if gl is None:
         graphs = ", ".join(graph_names()) or "(none)"
@@ -218,9 +225,16 @@ def get_plot_info(graph_name: str) -> list:
     create_graph/add_plot_to_graph when y_error_col is used).
     """
     infos = []
-    for pname in get_plot_names(graph_name):
-        col = find_plot_column(pname)
-        is_error = col is not None and col.Type == _COM_COLTYPE_Y_ERROR
+    for position,pname in enumerate(get_plot_names(graph_name),1):
+        from .graph_context import read_number
+        pid=read_number(graph_name,f'layer.plot{position}.pid')
+        if pid is not None and pid > 0:
+            # An error-designated column may intentionally be a normal curve
+            # in another graph. Prefer the actual plot type to its designation.
+            is_error=pid in {231,233}
+        else:
+            col = find_plot_column(pname)
+            is_error = col is not None and col.Type == _COM_COLTYPE_Y_ERROR
         infos.append({"name": pname, "is_error": is_error})
     return infos
 
@@ -271,7 +285,8 @@ def read_layer_value(graph_name: str, expr: str):
     if not graph_layer_execute(graph_name, f"{var} = {expr};"):
         return None
     try:
-        return float(get_lt_var(var))
+        from .graph_context import numeric
+        return numeric(get_lt_var(var))
     except Exception:
         return None
 

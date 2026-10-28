@@ -1,3 +1,4 @@
+from .graph_context import layer_targeted, selected_index, explicit_selection
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from ..origin_connection import (
 from ..labtalk_safe import (
     labtalk_choice,
     labtalk_name,
+    labtalk_string,
     labtalk_text,
     validate_text_escapes,
     positive_column,
@@ -60,10 +62,10 @@ _OWN_GRAPH_TYPES = {"3d_scatter"}
 
 # Formats expGraph can write on Origin 2020 (probe-verified 2026-07-11).
 # Raster formats take a pixel size; vector formats are resolution-independent
-# and IGNORE the pixel width/height. SVG proved out as UNSUPPORTED on this
-# build (expGraph type:=svg fails and writes no file), so it is not offered.
+# and IGNORE the pixel width/height. SVG was unavailable on the historical Origin 2020 test install; it is
+# supported by the verified Origin 2026 path and checked by a fresh output.
 EXPORT_RASTER_FORMATS = {"png", "jpg", "tif", "bmp"}
-EXPORT_VECTOR_FORMATS = {"pdf", "eps", "emf"}
+EXPORT_VECTOR_FORMATS = {"pdf", "eps", "emf", "svg"}
 EXPORT_FORMATS = EXPORT_RASTER_FORMATS | EXPORT_VECTOR_FORMATS
 # Back-compat alias (was raster-only); kept so external importers don't break.
 EXPORT_IMAGE_FORMATS = EXPORT_RASTER_FORMATS
@@ -265,6 +267,7 @@ def create_graph(
     })
 
 @mcp.tool()
+@layer_targeted
 def add_plot_to_graph(
     graph_name: str,
     data_book: str,
@@ -272,7 +275,9 @@ def add_plot_to_graph(
     x_col: int,
     y_col: int,
     plot_type: str = "scatter",
-    y_error_col: int = 0
+    y_error_col: int = 0,
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Add another data series to an existing graph.
 
@@ -311,7 +316,7 @@ def add_plot_to_graph(
         _designate_error_column(safe_book, safe_sheet, safe_error_col)
         data_ref = f"[{safe_book}]{safe_sheet}!({safe_x_col},{safe_y_col},{safe_error_col})"
 
-    if not execute_labtalk(f"plotxy iy:={data_ref} plot:={ptype} ogl:=[{safe_graph_name}]Layer1;"):
+    if not execute_labtalk(f"plotxy iy:={data_ref} plot:={ptype} ogl:=[{safe_graph_name}]{selected_index(safe_graph_name)}!;"):
         msg = (
             f"Could not add plot {data_ref} to {safe_graph_name}. Check that "
             f"columns {safe_x_col} and {safe_y_col} exist and contain data."
@@ -338,7 +343,11 @@ def delete_graph(graph_name: str) -> str:
 
 
 @mcp.tool()
-def remove_plot(graph_name: str, plot_index: int = 1) -> str:
+@layer_targeted
+def remove_plot(graph_name: str, plot_index: int = 1,
+    layer_index: int | None = None,
+    layer_id: str | None = None,
+) -> str:
     """Remove a single data plot from a graph's first layer.
 
     Use this to delete a stray/duplicate/dead-guide curve without touching the
@@ -402,6 +411,7 @@ _ERROR_BAR_DESIG = {"y": 3, "x": 7}  # wks.col.type: 3=Y Error, 7=X Error
 
 
 @mcp.tool()
+@layer_targeted
 def set_error_bars(
     graph_name: str,
     data_book: str,
@@ -409,6 +419,8 @@ def set_error_bars(
     y_col: int,
     err_col: int,
     direction: str = "y",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Attach error bars to an EXISTING plot from an error column, in place.
 
@@ -449,86 +461,101 @@ def set_error_bars(
     flag = _ERROR_BAR_FLAGS[safe_dir]
     desig = _ERROR_BAR_DESIG[safe_dir]
     ref = f"[{safe_book}]{safe_sheet}"
+    target_layer = selected_index(safe_graph)
 
     infos_before = get_plot_info(safe_graph)
     data_before = sum(1 for p in infos_before if not p["is_error"])
 
-    # 1. Plot the error column into the layer (so it is a "plotted dataset").
-    if not execute_labtalk(
-        f"win -a {safe_graph}; "
-        f"plotxy iy:={ref}!col({safe_err}) plot:=200 ogl:=[{safe_graph}]Layer1;"
-    ):
-        msg = (
-            f"Origin could not plot error column {safe_err} of {ref} onto "
-            f"{safe_graph}. Check that the column contains numeric data."
-        )
-        raise ValueError(msg)
-    # 2. SETTLE — the fix. Without this the following designation/reassign race
-    #    the just-added plot and silently no-op (col.type stays 0, no whiskers).
-    settle_new_plots(safe_graph, expected_min_plots=len(infos_before) + 1)
-    # 3. Designate the error column as Y/X Error, 4. reassign it as error bars of
-    #    the Y plot, 5. rebuild the legend WITHOUT the error-column entry.
-    execute_labtalk(
-        f'win -a {safe_book}; page.active$ = "{safe_sheet}"; '
-        f"wks.col{safe_err}.type = {desig};"
-    )
-    execute_labtalk(
-        f"win -a {safe_graph}; "
-        f"range __mcp_yr = {ref}!col({safe_y}); "
-        f"range __mcp_er = {ref}!col({safe_err}); "
-        f"set __mcp_er {flag} __mcp_yr;"
-    )
-    execute_labtalk(f"win -a {safe_graph}; legend -r;")
+    from .graph_edit import snapshot_state, restore_state
+    from .graph_context import read_number
+    snapshots = snapshot_state(safe_graph)
+    legend_visible = read_number(safe_graph, 'legend.show')
 
-    # 6. VERIFY the attach took. The single reliable signal (live-probed) is the
-    #    error column's designation sticking; for Y the error plot also drops out
-    #    of the data-plot count (get_plot_info recognizes Y-error columns), so a
-    #    surviving extra DATA curve means the reassignment failed.
-    o = get_origin()
-    o.Execute(
-        f'win -a {safe_book}; page.active$ = "{safe_sheet}"; '
-        f"__mcp_ct = wks.col{safe_err}.type;"
-    )
-    col_type = int(round(o.LTVar("__mcp_ct")))
-    infos_after = get_plot_info(safe_graph)
-    data_after = sum(1 for p in infos_after if not p["is_error"])
-    attached = col_type == desig
-    if safe_dir == "y":
-        attached = (
-            attached
-            and data_after == data_before
-            and any(p["is_error"] for p in infos_after)
+    try:
+        # 1. Plot the error column into the layer (so it is a "plotted dataset").
+        if not execute_labtalk(
+            f"win -a {safe_graph}; page.active={target_layer}; "
+            f"plotxy iy:={ref}!col({safe_err}) plot:=200 ogl:=[{safe_graph}]{target_layer}!;"
+        ):
+            msg = (
+                f"Origin could not plot error column {safe_err} of {ref} onto "
+                f"{safe_graph}. Check that the column contains numeric data."
+            )
+            raise ValueError(msg)
+        # 2. SETTLE — the fix. Without this the following designation/reassign race
+        #    the just-added plot and silently no-op (col.type stays 0, no whiskers).
+        settle_new_plots(safe_graph, expected_min_plots=len(infos_before) + 1)
+        # 3. Designate the error column as Y/X Error, 4. reassign it as error bars of
+        #    the Y plot, 5. rebuild the legend WITHOUT the error-column entry.
+        execute_labtalk(
+            f'win -a {safe_book}; page.active$ = "{safe_sheet}"; '
+            f"wks.col{safe_err}.type = {desig};"
         )
-    if not attached:
-        # Remove the stray error-column curve we added (the last plot), then
-        # fail honestly instead of leaving damage behind a success message.
-        try:
-            gl = acquire_graph_layer(safe_graph)
-            if infos_after:
-                gl.DataPlots.Item(len(infos_after) - 1).Destroy()
-        except Exception:  # noqa: BLE001 - best-effort cleanup; the raise below is the point
-            pass
-        msg = (
-            f"Could not attach {safe_dir}-error bars from column {safe_err} to "
-            f"the column {safe_y} plot on {safe_graph}: the error column did not "
-            f"convert to error bars (read back col.type={col_type}, expected "
-            f"{desig}). Removed the stray curve. Rebuild the graph with "
-            f"y_error_col via create_graph / add_plot_to_graph instead."
+        execute_labtalk(
+            f"win -a {safe_graph}; page.active={target_layer}; "
+            f"range __mcp_yr = {ref}!col({safe_y}); "
+            f"range __mcp_er = {ref}!col({safe_err}); "
+            f"set __mcp_er {flag} __mcp_yr;"
         )
-        raise ValueError(msg)
-    return (
-        f"Attached {safe_dir}-error bars (column {safe_err}) to the column "
-        f"{safe_y} plot on {safe_graph}."
-    )
+        execute_labtalk(f"win -a {safe_graph}; page.active={target_layer}; legend -r;")
+
+        # 6. VERIFY the attach took. The single reliable signal (live-probed) is the
+        #    error column's designation sticking; for Y the error plot also drops out
+        #    of the data-plot count (get_plot_info recognizes Y-error columns), so a
+        #    surviving extra DATA curve means the reassignment failed.
+        o = get_origin()
+        o.Execute(
+            f'win -a {safe_book}; page.active$ = "{safe_sheet}"; '
+            f"__mcp_ct = wks.col{safe_err}.type;"
+        )
+        col_type = int(round(o.LTVar("__mcp_ct")))
+        infos_after = get_plot_info(safe_graph)
+        data_after = sum(1 for p in infos_after if not p["is_error"])
+        attached = col_type == desig
+        if safe_dir == "y":
+            attached = (
+                attached
+                and data_after == data_before
+                and any(p["is_error"] for p in infos_after)
+            )
+        if not attached:
+            # Remove the stray error-column curve we added (the last plot), then
+            # fail honestly instead of leaving damage behind a success message.
+            try:
+                gl = acquire_graph_layer(safe_graph)
+                if infos_after:
+                    gl.DataPlots.Item(len(infos_after) - 1).Destroy()
+            except Exception:  # noqa: BLE001 - best-effort cleanup; the raise below is the point
+                pass
+            msg = (
+                f"Could not attach {safe_dir}-error bars from column {safe_err} to "
+                f"the column {safe_y} plot on {safe_graph}: the error column did not "
+                f"convert to error bars (read back col.type={col_type}, expected "
+                f"{desig}). Removed the stray curve. Rebuild the graph with "
+                f"y_error_col via create_graph / add_plot_to_graph instead."
+            )
+            raise ValueError(msg)
+        return (
+            f"Attached {safe_dir}-error bars (column {safe_err}) to the column "
+            f"{safe_y} plot on {safe_graph}."
+        )
+    finally:
+        if legend_visible is not None:
+            graph_layer_execute(safe_graph, f'legend.show={int(legend_visible)};')
+        restore_state(safe_graph, snapshots)
 
 
 @mcp.tool()
+@layer_targeted
 def set_layer_geometry(
     graph_name: str,
     left: float | None = None,
     top: float | None = None,
     width: float | None = None,
     height: float | None = None,
+    units: str = "current",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Set a graph layer's panel geometry (position and size).
 
@@ -536,7 +563,9 @@ def set_layer_geometry(
     the page, so left=15, top=12, width=75, height=75 places a single panel
     with even margins. Use this to stop axis titles from being clipped outside
     the frame or to line up multi-panel figures. Only the provided fields are
-    changed. Operates on the graph's first layer.
+    changed. Select a layer by 1-based layer_index or persistent layer_id.
+    units explicitly distinguishes page_percent, parent_percent and physical sizes;
+    current retains legacy behavior.
 
     Args:
         graph_name: Graph name
@@ -550,31 +579,53 @@ def set_layer_geometry(
     """
     safe_graph = labtalk_name(graph_name, "graph_name")
     require_graph(safe_graph)
+    from .graph_context import finite
+    unit_names = {"page_percent": "page", "inch": "inch", "cm": "cm", "mm": "mm", "point": "point", "pixel": "pixel"}
     fields = {"left": left, "top": top, "width": width, "height": height}
     provided = {k: v for k, v in fields.items() if v is not None}
     if not provided:
         msg = "Provide at least one of left, top, width, or height."
         raise ValueError(msg)
+    provided = {k: finite(v, k, positive=k in {"width", "height"}) for k,v in provided.items()}
+    if units != "current":
+        if units == "parent_percent":
+            parent = read_layer_value(safe_graph, "layer.link")
+            if not parent or parent < 1:
+                raise ValueError("parent_percent requires a linked layer.")
+            if not graph_layer_execute(safe_graph, "layer.unit=7;"):
+                raise ValueError("Origin rejected parent layer units.")
+        else:
+            safe_unit = labtalk_choice(units, unit_names, "units")
+            if not execute_labtalk(f"laysetunit igp:={safe_graph} layer:={selected_index(safe_graph)} unit:={unit_names[safe_unit]};"):
+                raise ValueError("Origin rejected geometry units.")
+    # Linked layers may default ResizeParent=1. A child geometry edit would
+    # then move the parent and every sibling; temporarily disable that coupling.
+    resize_parent = read_layer_value(safe_graph, 'layer.ResizeParent')
+    graph_layer_execute(safe_graph, 'layer.ResizeParent=0;')
     # Route each field through the fresh, activated layer handle
     # (graph_layer_execute) — like the axis-range sibling — so it also lands on
     # graphs loaded from a .opju, then READ IT BACK. Geometry rounds to page
     # units (~0.5%), so a loose tolerance still catches a total no-op (the
     # loaded-graph freeze) while tolerating that rounding.
-    for k, v in provided.items():
-        if not graph_layer_execute(safe_graph, f"layer.{k} = {float(v)};"):
-            msg = f"Origin could not set layer {k} of {safe_graph}."
-            raise ValueError(msg)
-        got = read_layer_value(safe_graph, f"layer.{k}")
-        if got is not None:
-            tol = max(1.0, abs(float(v)) * 0.05)
-            if abs(got - float(v)) > tol:
-                msg = (
-                    f"layer {k} did not take on {safe_graph} (set {v}, read back "
-                    f"{got}). The layer ignored the change — the graph was most "
-                    f"likely loaded from a .opju Origin freezes over COM; recreate "
-                    f"it in-session with create_graph / plotxy."
-                )
-                raise ValueError(msg)
+    try:
+        for attempt in range(3):
+            for k, v in provided.items():
+                if not graph_layer_execute(safe_graph, f"layer.{k} = {float(v)};"):
+                    raise ValueError(f"Origin could not set layer {k} of {safe_graph}.")
+            mismatches=[]
+            for k,v in provided.items():
+                got = read_layer_value(safe_graph, f"layer.{k}")
+                if got is not None and abs(got-float(v)) > max(0.05,abs(float(v))*0.001):
+                    mismatches.append(f"layer {k} did not take on {safe_graph} (set {v}, read back {got}).")
+            if not mismatches:
+                break
+            # A new linked layer can hydrate its geometry after the first write.
+            graph_layer_execute(safe_graph,'doc -uw;')
+        if mismatches:
+            raise ValueError(' '.join(mismatches))
+    finally:
+        if resize_parent is not None:
+            graph_layer_execute(safe_graph, f'layer.ResizeParent={resize_parent:g};')
     return f"Set layer geometry of {safe_graph}: {', '.join(provided)}."
 
 
@@ -597,6 +648,7 @@ def _set_axis_labels_impl(
     """
     safe_graph_name = labtalk_name(graph_name, "graph_name")
     activate_window(safe_graph_name, "graph_name")
+    execute_labtalk(f"page.active={selected_index(safe_graph_name)};")
     if x_label:
         if not execute_labtalk(f"xb.text$ = {labtalk_text(x_label, 'x_label')};"):
             msg = f"Could not set the x-axis label on {safe_graph_name}."
@@ -629,16 +681,16 @@ def _set_border_axis_title_impl(graph_name: str, side: str, label: str) -> str:
     activate_window(safe_graph, "graph_name")
     nlayers = int(get_origin().LTVar("page.nlayers"))
     if side == "right":
-        if nlayers < 2:
+        if nlayers < 2 and not explicit_selection(safe_graph):
             msg = (
                 f"axis(op='labels', axis='right') needs a right-Y layer on "
                 f"{safe_graph}, but it has {nlayers} layer(s). Add one with "
                 "add_second_y_axis first, then set the right-axis title."
             )
             raise ValueError(msg)
-        obj, layer = "yr", 2
+        obj, layer = "yr", (selected_index(safe_graph) if explicit_selection(safe_graph) else 2)
     else:  # top
-        obj, layer = "xt", 1
+        obj, layer = "xt", (selected_index(safe_graph) if explicit_selection(safe_graph) else 1)
     safe = labtalk_text(label, "label")
     got = ""
     for attempt in range(3):
@@ -837,6 +889,11 @@ def add_second_y_axis(
     y_col: int,
     plot_type: str = "line+symbol",
     color: str = "",
+    layer_id: str = "mcpRightY",
+    parent_layer_index: int = 1,
+    auto_rescale: bool = False,
+    rebuild_legend: bool = False,
+    y_error_col: int = 0,
 ) -> str:
     """Add a right-side Y axis layer and plot a second dataset on it.
 
@@ -844,6 +901,7 @@ def add_second_y_axis(
         graph_name: Existing graph
         data_book, data_sheet: Source data
         x_col, y_col: Columns for the right-axis series (1-based)
+        y_error_col: Explicit Y error column (1-based, 0=none); no statistics are inferred.
         plot_type: scatter, line, line+symbol, column, bar, area
         color: Optional "r,g,b" (each 0-255) — always this comma-separated
             numeric form, unlike `set_plot_style`'s `color` (named, e.g.
@@ -867,6 +925,9 @@ def add_second_y_axis(
     safe_sheet = labtalk_name(data_sheet, "data_sheet")
     sx = positive_column(x_col, "x_col")
     sy = positive_column(y_col, "y_col")
+    se = 0 if y_error_col == 0 and not isinstance(y_error_col, bool) else positive_column(y_error_col, "y_error_col")
+    if se and se in {sx, sy}:
+        raise ValueError("y_error_col must differ from x_col and y_col.")
     safe_type = labtalk_choice(plot_type, PLOT_TYPES, "plot_type")
     if safe_type in _Y_ONLY_TYPES or safe_type in _XYZ_TYPES:
         msg = f"add_second_y_axis supports only X,Y plot types, not '{safe_type}'."
@@ -874,51 +935,82 @@ def add_second_y_axis(
     ptype = PLOT_TYPES[safe_type]
     require_graph(safe_graph)
     require_worksheet(safe_book, safe_sheet)
-    activate_window(safe_graph, "graph_name")
-    if not execute_labtalk("layadd type:=righty;"):
-        msg = f"Could not add a right-Y layer to {safe_graph}."
-        raise ValueError(msg)
-    layer = int(get_origin().LTVar("page.nlayers"))
-    data_ref = f"[{safe_book}]{safe_sheet}!({sx},{sy})"
-    if not execute_labtalk(f"plotxy iy:={data_ref} plot:={ptype} ogl:=[{safe_graph}]{layer}!;"):
-        msg = f"Added the right-Y layer but could not plot {data_ref} on it."
-        raise ValueError(msg)
-    msg = f"Added right-Y axis (layer {layer}) to {safe_graph} with {safe_type} plot"
+    from .graph_edit import ensure_graph_layer, snapshot_state, restore_state
+    from .graph_context import layer_scope, read_plot_option
+    # Validate color before creating any layer.
     if color:
         from .style import _parse_rgb
         r, g, b = _parse_rgb(color)
-        col = f"color({r},{g},{b})"
-        # The right axis is layer 2's y2 (positional right). Select that layer,
-        # then color the LINE (y2.color) and the tick-NUMBER labels
-        # (y2.label.color). Issued as separate statements: Origin can fail a
-        # 3+ layer.* batch as a whole and apply nothing.
-        execute_labtalk(f"win -a {safe_graph};")
-        execute_labtalk(f"page.active={layer};")
-        ok_line = execute_labtalk(f"layer.y2.color={col};")
-        ok_label = execute_labtalk(f"layer.y2.label.color={col};")
-        execute_labtalk("doc -uw;")
-        if ok_line and ok_label:
-            msg += f"; colored right axis line + tick labels {col}"
-        else:
-            msg += f"; WARNING right-axis color {col} may not have applied"
-    # Adding the second-layer plot leaves the legend with only layer 1's
-    # entries, a default border, and often overlapping data (the wfB_dualy
-    # regression, item 30). Rebuild it to cover BOTH layers, drop the border,
-    # and re-place it away from the data via the shared placer.
-    import time
-
-    from .style_helpers import place_legend_avoiding_data
-
-    execute_labtalk(f"win -a {safe_graph}; legend -r;")
-    execute_labtalk("legend.background = 0;")
-    time.sleep(0.3)
-    placement = place_legend_avoiding_data(safe_graph)
-    msg += f"; legend rebuilt borderless, placed {placement}"
-    return msg
+    identity=labtalk_name(layer_id,'layer_id')
+    from .graph_context import graph_page,read_string
+    binding_marker=f'origin_mcp_xy:{safe_book}:{safe_sheet}:{sx}:{sy}:{ptype}'
+    if se:
+        binding_marker += f':error:{se}'
+    existing_layers=graph_page(safe_graph).Layers
+    for i in range(existing_layers.Count):
+        if existing_layers.Item(i).Name==identity:
+            with layer_scope(safe_graph,i+1):
+                previous=read_string(safe_graph,'layer.comments$')
+                if previous and previous.startswith('origin_mcp_xy:') and previous!=binding_marker:
+                    raise ValueError('Named right-Y layer has a different X/Y mapping or plot type; use a new layer_id.')
+                if existing_layers.Item(i).DataPlots.Count:
+                    # Metadata may be stale after a manual Origin edit.
+                    from .graph_context import read_plot_x_binding
+                    execute_labtalk(f'range __mcp_src=[{safe_book}]{safe_sheet}!col({sx}); string __mcp_ds$=nameof(__mcp_src)$;')
+                    wanted_x = get_lt_str('__mcp_ds$')
+                    actual_x = read_plot_x_binding(safe_graph, i + 1, 1)
+                    if not wanted_x or actual_x != wanted_x:
+                        raise ValueError('Named right-Y layer has a different or unreadable actual X binding; use a new layer_id.')
+    snapshots = snapshot_state(safe_graph)
+    layer_info = json.loads(ensure_graph_layer(safe_graph, layer_id, 'right-y', parent_layer_index))
+    layer = layer_info['layer_index']
+    columns = f"{sx},{sy},{se}" if se else f"{sx},{sy}"
+    data_ref = f"[{safe_book}]{safe_sheet}!({columns})"
+    try:
+        with layer_scope(safe_graph, layer):
+            gl = acquire_graph_layer(safe_graph)
+            from .graph_context import read_string
+            previous_binding=read_string(safe_graph,'layer.comments$')
+            if previous_binding and previous_binding.startswith('origin_mcp_xy:') and previous_binding!=binding_marker:
+                raise ValueError('Named right-Y layer has a different X/Y mapping or plot type; use a new layer_id.')
+            if gl.DataPlots.Count:
+                # Compare the actual dataset name for the explicitly named source.
+                execute_labtalk(f'range __mcp_src=[{safe_book}]{safe_sheet}!col({sy}); string __mcp_ds$=nameof(__mcp_src)$;')
+                wanted = [get_lt_str('__mcp_ds$')]
+                if se:
+                    execute_labtalk(f'range __mcp_src=[{safe_book}]{safe_sheet}!col({se}); string __mcp_ds$=nameof(__mcp_src)$;')
+                    wanted.append(get_lt_str('__mcp_ds$'))
+                found = [gl.DataPlots.Item(i).Name for i in range(gl.DataPlots.Count)]
+                if not all(wanted) or found != wanted:
+                    raise ValueError(f"Layer {layer_id} already has a different binding: {found}; requested {data_ref}. Refusing to duplicate or replace it.")
+            else:
+                if se:
+                    _designate_error_column(safe_book, safe_sheet, se)
+                if not execute_labtalk(f"plotxy iy:={data_ref} plot:={ptype} ogl:=[{safe_graph}]{layer}!;"):
+                    raise ValueError(f"Could not plot {data_ref} on the right-Y layer.")
+            if layer_info['created'] or (previous_binding or '').startswith('origin_mcp_xy:'):
+                graph_layer_execute(safe_graph,f'layer.comments$="{binding_marker}";')
+            settle_new_plots(safe_graph, expected_min_plots=2 if se else 1)
+            if layer_info['created'] and not rebuild_legend:
+                graph_layer_execute(safe_graph,'legend.show=0;')
+            if color:
+                col = f"color({r},{g},{b})"
+                for expr in ['layer.y2.color','layer.y2.label.color']:
+                    if not graph_layer_execute(safe_graph,f'{expr}={col};'):
+                        raise ValueError(f'Origin rejected {expr}.')
+            if auto_rescale:
+                graph_layer_execute(safe_graph,'rescale;')
+            graph_layer_execute(safe_graph,'doc -uw;')
+    finally:
+        if not auto_rescale:
+            restore_state(safe_graph, snapshots)
+    if rebuild_legend:
+        execute_labtalk(f'win -a {safe_graph}; page.active=1; legend -r;')
+    return f"Configured right-Y axis (layer {layer}, id {layer_id}) on {safe_graph}; existing ranges/ticks/layout preserved={not auto_rescale}; legend rebuilt={rebuild_legend}" + ('; colored right axis line + tick labels' if color else '')
 
 
 @mcp.tool()
-def add_layer(graph_name: str, layer_type: str = "right-y") -> str:
+def add_layer(graph_name: str, layer_type: str = "right-y", layer_id: str = "", parent_layer_index: int = 1) -> str:
     """Add a new layer (panel/axis) to a graph.
 
     Args:
@@ -928,21 +1020,24 @@ def add_layer(graph_name: str, layer_type: str = "right-y") -> str:
     Returns:
         Success message naming the new layer index
     """
-    safe_graph = labtalk_name(graph_name, "graph_name")
-    type_map = {
-        "right-y": "righty",
-        "top-x": "topx",
-        "inset": "inset",
-        "independent": "independent",
-    }
-    safe_layer_type = labtalk_choice(layer_type.lower(), type_map, "layer_type")
+    from .graph_edit import ensure_graph_layer, snapshot_state, restore_state
+    if layer_id:
+        result = json.loads(ensure_graph_layer(graph_name,layer_id,layer_type,parent_layer_index,layer_type=='right-y',layer_type=='right-y'))
+        return f"Configured {layer_type} layer (layer {result['layer_index']}, id {layer_id}) on {graph_name}"
+    safe_graph = labtalk_name(graph_name,"graph_name")
+    type_map={"right-y":"righty","top-x":"topx","inset":"inset","independent":"normal"}
+    safe_type=labtalk_choice(layer_type,type_map,"layer_type")
     require_graph(safe_graph)
-    activate_window(safe_graph, "graph_name")
-    if not execute_labtalk(f"layadd type:={type_map[safe_layer_type]};"):
-        msg = f"Could not add a {safe_layer_type} layer to {safe_graph}."
-        raise ValueError(msg)
-    layer = int(get_origin().LTVar("page.nlayers"))
-    return f"Added {safe_layer_type} layer (layer {layer}) to {safe_graph}"
+    snapshots=snapshot_state(safe_graph)
+    try:
+        activate_window(safe_graph,"graph_name")
+        execute_labtalk(f'page.active={positive_int(parent_layer_index,"parent_layer_index")};')
+        if not execute_labtalk(f'layadd igp:={safe_graph} type:={type_map[safe_type]};'):
+            raise ValueError('Origin rejected layer creation.')
+        layer=int(get_origin().LTVar('page.nlayers'))
+    finally:
+        restore_state(safe_graph,snapshots)
+    return f"Added {safe_type} layer (layer {layer}) to {safe_graph}"
 
 
 def _add_reference_line_impl(
@@ -1032,9 +1127,13 @@ def _export_via_expgraph(
     if not os.path.splitext(path)[1]:
         path = f"{path}.{safe_format}"
     out_dir = os.path.dirname(path)
+    labtalk_string(out_dir,'file_path')
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     fname = os.path.splitext(os.path.basename(path))[0]
+    labtalk_string(fname,'file_path')
+    if os.path.splitext(path)[1].lower()!='.'+safe_format:
+        raise ValueError('File extension must match format.')
     # Vector formats (pdf/eps/emf) are resolution-independent — passing a
     # pixel size option makes expGraph fail on Origin 2020 (probe-verified),
     # so size options are emitted only for raster formats.
@@ -1042,14 +1141,20 @@ def _export_via_expgraph(
     if safe_format in EXPORT_RASTER_FORMATS:
         safe_width = positive_int(width, "width")
         size_opts = f" tr1.unit:=2 tr1.width:={safe_width}"
+    # Export to a unique staging name so a pre-existing file can never be
+    # mistaken for a successful write. Atomically replace only after success.
+    staged_name = f'{fname}_mcp_{uuid.uuid4().hex}'
+    staged_path = os.path.join(out_dir, staged_name + '.' + safe_format)
     cmd = (
         f'expGraph type:={safe_format} path:="{out_dir}" filename:="{fname}" '
         f"overwrite:=replace{size_opts};"
     )
+    cmd = cmd.replace(f'filename:="{fname}"',f'filename:="{staged_name}"')
+    cmd = cmd.replace('overwrite:=replace',f'export:=specified pages:={safe_graph} tr.Margin:=2 overwrite:=replace')
     if not execute_labtalk(cmd):
         msg = f"Origin could not export {safe_graph} to {path}."
         raise ValueError(msg)
-    if not os.path.exists(path):
+    if not os.path.exists(staged_path) or os.path.getsize(staged_path) == 0:
         hint = ""
         if path.startswith("/"):
             hint = (
@@ -1058,6 +1163,7 @@ def _export_via_expgraph(
             )
         msg = f"Export failed: {path} was not created.{hint}"
         raise ValueError(msg)
+    os.replace(staged_path,path)
     return path
 
 
@@ -1381,6 +1487,7 @@ _AXIS_OPS = {"labels", "range", "scale", "tick", "frame"}
 
 
 @mcp.tool()
+@layer_targeted
 def axis(
     graph_name: str,
     op: str,
@@ -1396,6 +1503,8 @@ def axis(
     rescale: bool = True,
     frame: str | None = None,
     frame_width: float | None = None,
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Configure a graph's axes.
 
@@ -1459,7 +1568,8 @@ def axis(
         y_label = label if safe_axis in ("y", "both") else ""
         return _set_axis_labels_impl(graph_name, x_label=x_label, y_label=y_label)
     if safe_op == "range":
-        safe_axis = labtalk_choice(axis.lower(), {"x", "y", "both"}, "axis")
+        safe_axis = labtalk_choice(axis.lower(), {"x", "y", "both", "right", "top"}, "axis")
+        safe_axis = {"right":"y","top":"x"}.get(safe_axis,safe_axis)
         kwargs: dict = {}
         if safe_axis in ("x", "both"):
             kwargs["x_min"] = range_min
@@ -1476,7 +1586,7 @@ def axis(
         # to both when the caller asked for "both" (or left it unset) instead
         # of silently narrowing to Y and leaving X untouched.
         safe_scale_axis = labtalk_choice(
-            (axis or "both").lower(), {"x", "y", "both"}, "axis"
+            {"right":"y","top":"x"}.get((axis or "both").lower(), (axis or "both").lower()), {"x", "y", "both"}, "axis"
         )
         if safe_scale_axis == "both":
             x_msg = _set_axis_scale_impl(
@@ -1579,12 +1689,15 @@ def annotate(
 
 
 @mcp.tool()
+@layer_targeted
 def colormap(
     graph_name: str,
     palette: str | None = None,
     z_min: float | None = None,
     z_max: float | None = None,
     levels: int | None = None,
+    layer_index: int | None = None,
+    layer_id: str | None = None,
 ) -> str:
     """Configure the color map of a contour/heatmap/surface graph.
 
@@ -1637,6 +1750,10 @@ def export_graph(
     format: str = "png",
     width: int = 0,
     sized: bool = False,
+    area: str = "page",
+    layer_index: int | None = None,
+    layer_id: str | None = None,
+    powerpoint_compatible: bool = False,
 ) -> str:
     """Export a graph to an image file.
 
@@ -1662,6 +1779,9 @@ def export_graph(
     Returns:
         Path to the exported file.
     """
+    if format.lower() == 'svg' or area != 'page' or layer_index is not None or layer_id or powerpoint_compatible:
+        from .vector_export import export_with_options
+        return export_with_options(graph_name, file_path, format.lower(), area, layer_index, layer_id, powerpoint_compatible, width or 1200)
     if sized or width > 0:
         return _export_graph_sized_impl(
             graph_name, file_path, width=width or 1200, format=format

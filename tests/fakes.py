@@ -76,8 +76,8 @@ _LAYER_WRITE_RE = re.compile(r"layer\.([xy]2?)\.(from|to|thickness)\s*=\s*(-?[0-
 _LAYER_READ_RE = re.compile(r"^\s*(__\w+)\s*=\s*layer\.([xy]2?)\.(from|to|thickness)\s*;?\s*$")
 # Panel geometry (layer.left/top/width/height) writes/reads, so the fake can
 # model set_layer_geometry's read-back verification the same way.
-_LAYER_GEO_WRITE_RE = re.compile(r"layer\.(left|top|width|height)\s*=\s*(-?[0-9.eE+]+)")
-_LAYER_GEO_READ_RE = re.compile(r"^\s*(__\w+)\s*=\s*layer\.(left|top|width|height)\s*;?\s*$")
+_LAYER_GEO_WRITE_RE = re.compile(r"layer\.(left|top|width|height|unit|link|ResizeParent)\s*=\s*(-?[0-9.eE+]+)")
+_LAYER_GEO_READ_RE = re.compile(r"^\s*(__\w+)\s*=\s*layer\.(left|top|width|height|unit|link|ResizeParent)\s*;?\s*$")
 
 
 class FakeLayer:
@@ -97,6 +97,8 @@ class FakeLayer:
         self._origin = origin
         self.executed = []
         self._vals = {}
+        self._options = {}
+        self.Name = 'Layer1'
 
     @property
     def DataPlots(self):
@@ -106,6 +108,36 @@ class FakeLayer:
     def Execute(self, script):
         self.executed.append(script)
         o = self._origin
+        name_set = re.search(r'layer.name\$\s*=\s*"([A-Za-z_]\w*)";',script)
+        if name_set:
+            self.Name=name_set[1]
+        plot = re.search(r'plotxy iy:=\[([^]]+)\]([^!]+)!\((?P<x>\d+),(?P<y>\d+)(?:,(?P<error>\d+))?\)',script)
+        if plot:
+            self._graph.plot_names.append(plot[1]+'_'+chr(64+int(plot['y'])))
+            self._x_binding=plot[1]+'_'+chr(64+int(plot['x']))
+            if plot['error']:
+                self._graph.plot_names.append(plot[1]+'_'+chr(64+int(plot['error'])))
+        if 'range -wx __mcp_xsource=' in script and o is not None:
+            o.__dict__.setdefault('_strings', {})['__mcp_xname$']=getattr(self, '_x_binding', '')
+        option_set = re.search(r'set (\S+) -(wp|w) ([0-9.eE+-]+);',script)
+        option_get = re.search(r'get (\S+) -(wp|w) (__\w+);',script)
+        if option_set and not self._graph.frozen:
+            ds,flag,value=option_set.groups()
+            self._options[ds]=float(value)/(500 if flag=='w' else 1)
+        if option_get and o is not None:
+            ds,flag,var=option_get.groups()
+            o.lt_vars[var]=self._options.get(ds,1.0)*(500 if flag=='w' else 1)
+        if script.startswith('__mcp_value=0/0;') and o is not None:
+            expr=script.split('__mcp_value=',2)[-1].rstrip(';')
+            match=re.fullmatch(r'layer.plot(\d+).pid',expr)
+            if match:
+                index=int(match[1])-1
+                names=self._graph.visible_plot_names()
+                name=names[index] if index<len(names) else ''
+                error=any(name==b.Name+'_'+c.Name and c.Type==2 for b in o.books for sheet in b.sheets for c in sheet.columns)
+                o.lt_vars['__mcp_value']=231.0 if error else 200.0
+            else:
+                o.lt_vars['__mcp_value']=self._vals.get(('geo',expr.removeprefix('layer.')),0.0)
         read = _LAYER_READ_RE.match(script)
         geo_read = _LAYER_GEO_READ_RE.match(script)
         if read is not None and o is not None:
@@ -151,7 +183,9 @@ class FakeGraph:
     @property
     def Layers(self):
         # Fallback acquisition route (_find_layer_com via GraphPages).
-        return FakePages([FakeLayer(self, None)])
+        if not hasattr(self,'_layers'):
+            self._layers=[FakeLayer(self,getattr(self,'_origin',None))]
+        return FakePages(self._layers)
 
 
 class FakeMatrix:
@@ -185,6 +219,10 @@ class FakeOrigin:
 
     @property
     def GraphPages(self):
+        for g in self.graphs:
+            g._origin=self
+            for i in range(g.Layers.Count):
+                g.Layers.Item(i)._origin=self
         return FakePages(self.graphs)
 
     @property
@@ -194,6 +232,25 @@ class FakeOrigin:
     def Execute(self, script):
         self.executed.append(script)
         self._maybe_activate(script)
+        active=re.search(r'page.active\s*=\s*(\d+)',script)
+        if active:self.__dict__['_active_layer']=int(active[1])
+        if script.startswith('layadd'):
+            graph=next(g for g in self.graphs if g.Name==getattr(self,'_active_graph',g.Name))
+            self.GraphPages
+            child=FakeGraph(graph.Name)
+            layer=FakeLayer(child,self);layer.Name='RightY'
+            layer._vals.update({('geo','unit'):7,('geo','link'):1,('geo','width'):100,('geo','height'):100})
+            graph._layers.append(layer)
+            self._active_layer=graph.Layers.Count
+        if 'nameof(__mcp_src)$' in script:
+            m=re.search(r'\[([^]]+)\][^!]+!col\((\d+)\)',script)
+            if m:self.__dict__.setdefault('_strings',{})['__mcp_ds$']=m[1]+'_'+chr(64+int(m[2]))
+        if script.startswith('plotxy'):
+            m=re.search(r'ogl:=\[([^]]+)\](\d+)!',script)
+            if m:
+                g=next(g for g in self.graphs if g.Name==m[1])
+                # The real global plotxy targets the explicit destination layer.
+                g.Layers.Item(int(m[2])-1).Execute(script)
         for prefix, result in self.execute_results.items():
             if script.startswith(prefix):
                 return result
@@ -206,6 +263,7 @@ class FakeOrigin:
         if m is None:
             return
         name = m.group(1)
+        self._active_graph=name
         for g in self.graphs:
             if g.Name == name:
                 g.activated = True
@@ -226,7 +284,9 @@ class FakeOrigin:
             return cache[target]
         for graph in self.graphs:
             if target == f"[{graph.Name}]Layer1":
-                cache[target] = FakeLayer(graph, self)
+                graph._origin=self
+                cache[target] = graph.Layers.Item(0)
+                cache[target]._origin=self
                 return cache[target]
         return None
 
@@ -265,10 +325,14 @@ class FakeOrigin:
         return name
 
     def LTVar(self, name):
+        if name in self.lt_vars:return self.lt_vars[name]
+        if name=='page.active':return getattr(self,'_active_layer',1)
+        if name=='page.nlayers':
+            return next((g.Layers.Count for g in self.graphs if g.Name==getattr(self,'_active_graph','')),0)
         return self.lt_vars.get(name, 0.0)
 
     def LTStr(self, name):
-        return ""
+        return getattr(self,'_strings',{}).get(name,'')
 
 
 class ThreadGuardedFake:

@@ -339,6 +339,39 @@ export_graph(graph_name="Fig1", file_path="C:\\Users\\name\\figures\\fig1.png")
 
 After export, inspect whether labels are readable, legends avoid data, axis ranges are appropriate, and error bars are visible.
 
+## Verified editing workflow and version boundaries
+
+Use explicit graph names. For a specific panel, pass layer_index or layer_id
+to axis, plot, font, tick, geometry and colormap tools. A stable layer_id is an
+Origin layer name that survives project saves; do not assume every right axis
+is layer 2. Right-Y styling targets y2 and its title YR.
+
+Before editing existing figures, read inspect_graph. Prefer configure_layer
+for requested/actual/not_applied/unverifiable diagnostics. Line widths use
+physical points through capability-checked -wp; the old 200-unit estimate was
+wrong on Origin 2026. Missing properties are null and must remain unverifiable.
+Check final exports after readback; success from COM is insufficient.
+
+Adding a right axis preserves existing ranges, tick increments, legend and
+layout unless the caller explicitly requests automatic changes. Repeated
+named-layer configuration reuses objects. Use set_group_edit_mode to style
+stacked groups independently; never reconstruct them as line plots.
+
+For reusable work, list_figure_templates and apply_figure_template separate
+explicit data mappings, layout and optional style. SD/SEM/CI must come from
+specified error columns and explicit provenance; templates do not calculate
+them. No source data, study paths or journal defaults belong in templates.
+The optional large_source_arial profile is a source editing convenience only.
+Check scaled text at the final physical size separately.
+
+Origin 2026 synthetic tests cover native SVG/PDF, semantic layer and plot-area
+crops, and optional safe rectangular-mask conversion for PowerPoint. Crops
+keep original exports and remove whole axis/text objects before clipping.
+Opaque rectangular masks can become clip paths; complex/translucent masks
+cannot be converted blindly. Other historical Origin 2020 limitations in this
+skill are evidence for that installation, not universal 2026 restrictions.
+The updated code has not been run against Origin 2020.
+
 ## Extended Toolkit (beyond 2D line plots)
 
 The server exposes 45 tools, several of them dispatchers (one tool name,
@@ -450,9 +483,8 @@ rather than a follow-up `list_worksheets` call.
   frame/fonts/line/symbol styling with new data.
 - `export_graph(graph, path, width=1600)` exports at an exact pixel width
   (vs. the default, which exports at ~1200px wide; height always follows the
-  graph's aspect ratio). Also supports vector formats — `format="pdf"/"eps"/
-  "emf"` — for a resolution-independent journal submission (`svg` is not
-  offered; Origin's expGraph fails to write one). Both write the file
+  graph's aspect ratio). Also supports vector formats — `format="svg"/"pdf"/"eps"/
+  "emf"` — for a resolution-independent journal submission (SVG is also available on the tested Origin 2026 installation; fresh-file checks reject unavailable formats). Both write the file
   directly via expGraph with no clipboard, so the user's clipboard is
   preserved.
 
@@ -472,7 +504,6 @@ These COM behaviors were observed while testing on Origin Pro 2020. Other Origin
 | Colormap palettes load via `layer.cmap.load(<name>.pal); layer.cmap.updateScale()` (the `()` matters) | `colormap` wraps this |
 | Fit statistics can reset after `nlend` | Read statistics before ending the nonlinear fit session |
 | Error-bar plots appear as separate entries in `DataPlots` | MCP styling tools detect them via the column's Y-Error designation and only color-match them — symbol/line commands would redraw error bars as connected lines |
-| Error-bar `set -erw`/`-erwc` use POINTS, unlike the data line's `-w` (~200 units/pt) | Set `-erw` (error-bar line width) and `-erwc` (cap/whisker width) in points. Passing a `-w`-scale value (e.g. 550) into `-erw` makes bars explode — that was a units mistake, not an Origin bug. MCP tools set `-erw` in points and scale `-erwc` to the symbol size |
 | `set <plot>` silently fails when the graph window is not active | Run `win -a <graph>` first |
 | `[Book]Sheet!col(n).type = ...` is silently ignored | Activate the sheet and use `wks.col(n).type` instead |
 | A graph loaded from a `.opju` project file can report zero data plots over COM, so per-curve styling/ungrouping used to silently no-op | The core per-curve/axis/frame tools (`set_plot_style`, `ungroup_plots`, `remove_plot`, `axis` range/scale/tick) now activate the page and re-acquire a fresh layer handle before each call; axis-range calls also read the value back and raise if it didn't change. If plots are still zero, the tool raises an actionable error — recreate the graph in-session (`create_graph`/`plotxy`) rather than editing the loaded one. Text/font/legend tools (`set_graph_font`, `set_legend`) still go through plain LabTalk and can silently no-op on a loaded graph — verify those in the exported image |
@@ -484,7 +515,6 @@ These COM behaviors were observed while testing on Origin Pro 2020. Other Origin
 | Second-Y-axis (layer 2) right-axis styling looks unreachable via `layer.y.*` / `.bold` / `yl.text$` (those target layer 2's HIDDEN LEFT axis + title, not the visible right one) | The visible right axis is layer 2's **`y2`** (positional right). With the graph active and layer 2 selected (`win -a <graph>; page.active=2;`): right axis LINE + ticks via `layer.y2.color=color(...)`, right tick-NUMBER labels via `layer.y2.label.color=color(...)`, then `doc -uw;` — all verified live. `add_second_y_axis(..., color="r,g,b")` emits this. The right-axis TITLE is the separate `YR` text object — `yr.text$="\b(Label)"` (bold via markup, not `YR.bold=1`), `YR.color=color(...)`, `YR.fsize=...` |
 | Removing ONE plot when the same dataset is plotted more than once: `layer -e <dataset>` (and `range r; delete r`) address by dataset NAME, so they remove EVERY copy | `remove_plot(plot_index=n)` now uses the COM DataPlot `Destroy()` addressed by index — removes only the indexed plot. (DataPlot has no `Remove`/`Delete`; `Destroy` is the only per-index route on Origin 2020) |
 | Colormap/heatmap shows only ~8 discrete bands and looks impossible to make continuous — `rp.colormap.*` writes and `numColors=<n>; setLevels();` (no-arg) are silent no-ops | Raise the level count with `layer.cmap.numMajorLevels=<n>; layer.cmap.setLevels(1); layer.cmap.updateScale();` (the `setLevels(1)` arg + `updateScale()` are the missing steps). `colormap(graph_name, levels=32..64)` emits this and read-back-verifies `layer.cmap.numColors`. NOTE: applying a `palette` DOES recolor the map even when the exported PNG byte-size is unchanged (byte-compare is misleading — inspect pixels) |
-| Layer-2 connecting-LINE width via `set <ds> -w <n>` looked non-deterministic ("flaky") | It is deterministic WITH the protocol: `win -a <graph>; page.active=2; set <ds> -w <n>; doc -uw;` + a ~2s settle (5/5 repeats identical live). It SATURATES around `-w 8` (w=8 and w=20 render identically), so to exceed that thickness plot a scaled copy of the data on layer 1 and draw it thick with `set_plot_style(line_width=...)` |
 | Bar/column FILL PATTERN (hatch) is NOT scriptable on Origin 2020 | HARD LIMITATION. Every route no-ops (verified live, byte-identical + zero rendered hatch): `set <ds> -pfp/-pfw/-pfc` (the correct documented flags), indexed patterns `-pfpd/-pfpi`, the range tree `rp.pattern.*`, and the plot-object tree `layer.plotN.pattern.*`. Apply hatching in PPT/Illustrator, or use solid fills distinguished by color |
 | Plot TRANSPARENCY / alpha is NOT scriptable on Origin 2020 | HARD LIMITATION. `set <ds> -paap/-paal/-paas`, `rr.transparency`, `layer.transparency`, `page.transparency` all return success but no-op (verified live, byte-identical). Use fully-opaque colors, or composite the alpha in PPT. (Unconfirmed future candidate: the `originpro` Python `Plot.transparency(t)` method — not installed in this env to test) |
 | `layer.y.inc` (tick spacing) on a heatmap/2D y-axis can appear to no-op | It works — the write needs the graph window ACTIVE first (`win -a <graph>; page.active=<n>;`) and a `doc -uw;` refresh afterward, same as other per-layer LabTalk |

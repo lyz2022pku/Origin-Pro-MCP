@@ -103,5 +103,6 @@ def test_session_has_com_init_helpers():
     assert hasattr(daemon.Session, "_com_initialize")
     assert hasattr(daemon.Session, "_com_uninitialize")
     # On WSL (no pythoncom) initialize returns False without raising.
-    assert daemon.Session._com_initialize() is False
+    import importlib.util
+    assert daemon.Session._com_initialize() is (importlib.util.find_spec('pythoncom') is not None)
     daemon.Session._com_uninitialize()  # must not raise

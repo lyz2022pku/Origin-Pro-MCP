@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "templates": {
+    "single_axis": {"family": "xy", "layers": ["main"], "error_statistics": "explicit_input_only"},
+    "dual_y": {"family": "xy", "layers": ["main", "right"], "shared_x": true},
+    "inset": {"family": "xy", "layers": ["main", "inset"]},
+    "grouped_stacked_column": {"family": "columns", "native_plot_id": 213, "group_positions": "explicit_x_column"},
+    "heatmap": {"family": "matrix", "color_scales": ["linear", "log10", "zero_centered"], "coordinates": "explicit_matrix_coordinates"}
+  },
+  "optional_style_profiles": {
+    "large_source_arial": {"font": "Arial", "bold": true, "title_size_pt": 32, "tick_size_pt": 28, "axis_width_pt": 3}
+  },
+  "default_style": {},
+  "notes": ["No data, paths, statistics or journal requirements are embedded.", "Check readability at final physical size separately."]
+}
